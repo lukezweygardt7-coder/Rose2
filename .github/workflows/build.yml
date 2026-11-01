@@ -12,121 +12,102 @@ permissions:
 
 jobs:
   build:
-    name: Forge 1.12.2 / Java 8
+    name: Forge 1.12.2 / ForgeGradle 5.1 / Java 8
     runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 8
+      - name: Set up Java 8
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "8"
+          java-version: '8'
 
-      - name: Find or extract Rose project
+      - name: Install Gradle 7.6.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://services.gradle.org/distributions/gradle-7.6.4-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-7.6.4/bin" >> "$GITHUB_PATH"
+
+      - name: Find or extract Rose source project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-
-          BUILD_FILE="$(find . -type f -name build.gradle \
-            -not -path './.git/*' \
-            -not -path './.gradle/*' \
-            -not -path '*/build/*' \
-            -print -quit || true)"
-
+          BUILD_FILE="$(find . -type f -name build.gradle -not -path './.git/*' -not -path '*/.gradle/*' -not -path '*/build/*' -print -quit || true)"
           if [[ -z "$BUILD_FILE" ]]; then
-            ZIP_FILE="$(find . -maxdepth 3 -type f -iname '*.zip' \
-              -not -path './.git/*' -print -quit || true)"
-
+            ZIP_FILE="$(find . -maxdepth 3 -type f -iname 'RoseCompanion-Forge1122-GitHubReady-Updated.zip' -print -quit || true)"
             if [[ -z "$ZIP_FILE" ]]; then
-              echo "::error::No Rose source ZIP found."
-              find . -maxdepth 4 -type f -print
+              echo '::error::Could not find the Rose source ZIP.'
+              find . -maxdepth 3 -type f -print | sort
               exit 1
             fi
-
-            echo "Extracting: $ZIP_FILE"
-            unzip -t "$ZIP_FILE"
-
-            mkdir -p .rose-build-source
-            unzip -q "$ZIP_FILE" -d .rose-build-source
-
-            BUILD_FILE="$(find .rose-build-source \
-              -type f -name build.gradle \
-              -print -quit || true)"
+            mkdir -p .rose-source
+            unzip -q "$ZIP_FILE" -d .rose-source
+            BUILD_FILE="$(find .rose-source -type f -name build.gradle -print -quit || true)"
           fi
-
           if [[ -z "$BUILD_FILE" ]]; then
-            echo "::error::Could not locate build.gradle after extraction."
+            echo '::error::Could not locate build.gradle.'
             exit 1
           fi
-
           PROJECT_DIR="$(dirname "$BUILD_FILE")"
           PROJECT_DIR="${PROJECT_DIR#./}"
-
-          echo "Found project: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Install Gradle 4.10.3
-        run: |
-          curl -fsSL \
-            https://services.gradle.org/distributions/gradle-4.10.3-bin.zip \
-            -o "$RUNNER_TEMP/gradle.zip"
-
-          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
-
-          echo "$RUNNER_TEMP/gradle-4.10.3/bin" >> "$GITHUB_PATH"
-
-      - name: Verify project files
+      - name: Verify project and toolchain
         working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
           set -euo pipefail
-
           java -version
           gradle --version
 
           test -f build.gradle
           test -f settings.gradle
-          test -f gradle.properties
           test -f src/main/resources/mcmod.info
           test -f src/main/resources/assets/rosecompanion/textures/entity/rose.png
           test -f src/main/resources/assets/rosecompanion/textures/items/rose_whistle.png
           test -f src/main/java/com/rosecompanion/RoseCompanion.java
           test -f src/main/java/com/rosecompanion/entity/EntityRoseDog.java
 
-          echo "All required project files found!"
+          grep -q "ForgeGradle.*5.1.77" build.gradle
+          grep -q "1.12.2-14.23.5.2864" build.gradle
 
-      - name: Build Rose Companion
+      - name: Build and reobfuscate Rose
         working-directory: ${{ steps.project.outputs.project_dir }}
-        run: |
-          gradle clean setupCIWorkspace build \
-            --no-daemon --stacktrace
+        run: gradle --no-daemon --stacktrace clean build
 
-      - name: Verify mod JAR
+      - name: Verify JAR contents
+        id: jar
         working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          JAR="build/libs/RoseCompanion-1.0.0.jar"
+          JAR_FILE="$(find build/libs -maxdepth 1 -type f -name 'RoseCompanion-*.jar' ! -name '*-sources.jar' -print -quit)"
 
-          test -s "$JAR"
+          test -n "$JAR_FILE"
+          test -s "$JAR_FILE"
 
-          jar tf "$JAR" > jar-contents.txt
+          jar tf "$JAR_FILE" > jar-contents.txt
 
-          grep -Fxq "mcmod.info" jar-contents.txt
-          grep -Fxq "com/rosecompanion/RoseCompanion.class" jar-contents.txt
-          grep -Fxq "com/rosecompanion/entity/EntityRoseDog.class" jar-contents.txt
-          grep -Fxq "assets/rosecompanion/textures/entity/rose.png" jar-contents.txt
+          grep -Fxq mcmod.info jar-contents.txt
+          grep -Fxq com/rosecompanion/RoseCompanion.class jar-contents.txt
+          grep -Fxq com/rosecompanion/entity/EntityRoseDog.class jar-contents.txt
+          grep -Fxq assets/rosecompanion/textures/entity/rose.png jar-contents.txt
+          grep -Fxq assets/rosecompanion/textures/items/rose_whistle.png jar-contents.txt
 
-          echo "Rose JAR verification successful!"
+          echo "jar_file=$JAR_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Rose Companion
+      - name: Upload compiled mod
         uses: actions/upload-artifact@v4
         with:
           name: RoseCompanion-Forge-1.12.2
-          path: ${{ steps.project.outputs.project_dir }}/build/libs/RoseCompanion-1.0.0.jar
+          path: ${{ steps.project.outputs.project_dir }}/${{ steps.jar.outputs.jar_file }}
           if-no-files-found: error
           retention-days: 14
