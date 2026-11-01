@@ -1,0 +1,135 @@
+name: Build Rose Companion
+
+'on':
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Forge 1.12.2 / Java 8
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Set up Gradle 4.10.3
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "4.10.3"
+
+      - name: Find Rose project folder
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_FILE="$(find . -type f -name build.gradle \
+            -not -path './.git/*' \
+            -not -path '*/.gradle/*' \
+            -not -path '*/build/*' -print -quit)"
+
+          if [[ -z "$BUILD_FILE" ]]; then
+            echo "::error::Could not find build.gradle."
+            find . -maxdepth 4 -type f -print | sort | head -200
+            exit 1
+          fi
+
+          PROJECT_DIR="${BUILD_FILE%/build.gradle}"
+          if [[ -z "$PROJECT_DIR" ]]; then
+            PROJECT_DIR="."
+          fi
+          PROJECT_DIR="${PROJECT_DIR#./}"
+
+          echo "Detected project: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify required Rose project files
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+
+          required_files=(
+            "build.gradle"
+            "settings.gradle"
+            "src/main/resources/mcmod.info"
+            "src/main/resources/assets/rosecompanion/textures/entity/rose.png"
+            "src/main/resources/assets/rosecompanion/textures/items/rose_whistle.png"
+            "src/main/java/com/rosecompanion/RoseCompanion.java"
+            "src/main/java/com/rosecompanion/entity/EntityRoseDog.java"
+          )
+
+          missing=0
+          for file in "${required_files[@]}"; do
+            if [[ -f "$file" ]]; then
+              echo "OK: $file"
+            else
+              echo "::error title=Missing project file::$file"
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Prepare ForgeGradle workspace and build
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: gradle clean setupCIWorkspace build --no-daemon --stacktrace
+
+      - name: Verify compiled mod JAR
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          JAR_FILE="build/libs/RoseCompanion-1.0.0.jar"
+
+          if [[ ! -s "$JAR_FILE" ]]; then
+            echo "::error::Compiled JAR was not created."
+            find build -maxdepth 4 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+
+          jar tf "$JAR_FILE" > jar-contents.txt
+
+          required_entries=(
+            "mcmod.info"
+            "com/rosecompanion/RoseCompanion.class"
+            "com/rosecompanion/entity/EntityRoseDog.class"
+            "assets/rosecompanion/textures/entity/rose.png"
+            "assets/rosecompanion/textures/items/rose_whistle.png"
+          )
+
+          for entry in "${required_entries[@]}"; do
+            if grep -Fxq "$entry" jar-contents.txt; then
+              echo "JAR OK: $entry"
+            else
+              echo "::error title=Missing JAR entry::$entry"
+              exit 1
+            fi
+          done
+
+      - name: Upload compiled mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoseCompanion-Forge-1.12.2
+          path: ${{ steps.project.outputs.project_dir }}/build/libs/RoseCompanion-1.0.0.jar
+          if-no-files-found: error
+          retention-days: 14
